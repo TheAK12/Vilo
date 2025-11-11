@@ -365,6 +365,7 @@ for pkg in "${PACKAGES[@]}"; do
 done
 print_success "All bootstrap dependencies installed"
 
+RACTOR_URL="https://raw.githubusercontent.com/CyberHuman-bot/Ractor/refs/heads/main/ractor.sh"
 print_step "Downloading Ractor..."
 if wget -q --spider "$RACTOR_URL"; then
   wget -q -O /tmp/ractor.sh "$RACTOR_URL" || print_error "Failed to download Ractor"
