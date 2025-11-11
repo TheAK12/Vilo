@@ -365,20 +365,14 @@ for pkg in "${PACKAGES[@]}"; do
 done
 print_success "All bootstrap dependencies installed"
 
-# Install Ractor package manager (Arch only)
-if [[ "$PKG_MANAGER" == "pacman" ]]; then
-    print_step "Installing Ractor Package Manager"
-    RACTOR_URL="https://raw.githubusercontent.com/CyberHuman-bot/Ractor/refs/heads/main/ractor.sh"
-    
-    print_info "Downloading Ractor..."
-    if wget -q --spider "$RACTOR_URL"; then
-        wget -q -O /tmp/ractor.sh "$RACTOR_URL" || error_exit "Failed to download Ractor"
-        chmod +x /tmp/ractor.sh
-        sudo mv /tmp/ractor.sh /usr/local/bin/ractor || error_exit "Failed to install Ractor"
-        print_success "Ractor installed successfully"
-    else
-        print_warning "Ractor download failed (non-critical, continuing...)"
-    fi
+print_step "Downloading Ractor..."
+if wget -q --spider "$RACTOR_URL"; then
+  wget -q -O /tmp/ractor.sh "$RACTOR_URL" || print_error "Failed to download Ractor"
+  chmod +x /tmp/ractor.sh
+  sudo mv /tmp/ractor.sh /usr/local/bin/ractor || print_error "Failed to install Ractor"
+  print_success "Ractor installed successfully"
+else
+  print_warning "Ractor download failed (non-critical, continuing...)"
 fi
 
 # Download and run main installation script
