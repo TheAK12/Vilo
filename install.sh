@@ -2,6 +2,7 @@
 
 # Vilo Installation Script
 # Installs and configures Hyprland + Waybar + Walker
+# With automatic GPU detection and optimization
 
 set -e  # Exit on error
 set -u  # Exit on undefined variable
@@ -56,6 +57,289 @@ if [ "$EUID" -eq 0 ]; then
     error_exit "Please do not run this script as root"
 fi
 
+# GPU Detection Function
+detect_gpu() {
+    print_step "Detecting Graphics Card"
+    
+    GPU_TYPE="unknown"
+    GPU_VENDOR=""
+    GPU_MODEL=""
+    
+    # Try lspci first (most reliable)
+    if command -v lspci &> /dev/null; then
+        GPU_INFO=$(lspci | grep -i 'vga\|3d\|display')
+        
+        if echo "$GPU_INFO" | grep -qi "nvidia"; then
+            GPU_TYPE="nvidia"
+            GPU_VENDOR="NVIDIA"
+            GPU_MODEL=$(echo "$GPU_INFO" | grep -i nvidia | head -n1)
+        elif echo "$GPU_INFO" | grep -qi "amd\|radeon"; then
+            GPU_TYPE="amd"
+            GPU_VENDOR="AMD"
+            GPU_MODEL=$(echo "$GPU_INFO" | grep -iE "amd|radeon" | head -n1)
+        elif echo "$GPU_INFO" | grep -qi "intel"; then
+            GPU_TYPE="intel"
+            GPU_VENDOR="Intel"
+            GPU_MODEL=$(echo "$GPU_INFO" | grep -i intel | head -n1)
+        fi
+    fi
+    
+    # Fallback to checking loaded kernel modules
+    if [ "$GPU_TYPE" = "unknown" ]; then
+        if lsmod | grep -qi "nvidia"; then
+            GPU_TYPE="nvidia"
+            GPU_VENDOR="NVIDIA"
+        elif lsmod | grep -qi "amdgpu"; then
+            GPU_TYPE="amd"
+            GPU_VENDOR="AMD"
+        elif lsmod | grep -qi "i915\|xe"; then
+            GPU_TYPE="intel"
+            GPU_VENDOR="Intel"
+        fi
+    fi
+    
+    if [ "$GPU_TYPE" != "unknown" ]; then
+        print_success "Detected GPU: $GPU_VENDOR"
+        if [ -n "$GPU_MODEL" ]; then
+            print_info "Model: $GPU_MODEL"
+        fi
+    else
+        print_warning "Could not detect GPU type. Using default settings."
+    fi
+    
+    echo ""
+}
+
+# Install GPU-specific packages
+install_gpu_drivers() {
+    print_step "Installing GPU-Specific Packages"
+    
+    case "$GPU_TYPE" in
+        nvidia)
+            print_info "Installing NVIDIA packages..."
+            if [[ "$PKG_MANAGER" == "pacman" ]]; then
+                GPU_PKGS=(
+                    nvidia
+                    nvidia-utils
+                    nvidia-settings
+                    libva-nvidia-driver
+                )
+            elif [[ "$PKG_MANAGER" == "apt" ]]; then
+                GPU_PKGS=(
+                    nvidia-driver
+                    nvidia-settings
+                    libnvidia-gl-550
+                    libva-nvidia-driver
+                )
+            elif [[ "$PKG_MANAGER" == "dnf" ]]; then
+                # Enable RPM Fusion for NVIDIA drivers
+                print_info "Enabling RPM Fusion repositories..."
+                sudo dnf install -y https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm || true
+                sudo dnf install -y https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm || true
+                
+                GPU_PKGS=(
+                    akmod-nvidia
+                    xorg-x11-drv-nvidia-cuda
+                    nvidia-settings
+                )
+            fi
+            
+            for pkg in "${GPU_PKGS[@]}"; do
+                eval "$PKG_INSTALL $pkg" || print_warning "Failed to install $pkg"
+            done
+            
+            print_warning "NVIDIA GPU detected. Additional configuration may be required."
+            print_info "Please refer to: https://wiki.hyprland.org/Nvidia/"
+            ;;
+            
+        amd)
+            print_info "Installing AMD packages..."
+            if [[ "$PKG_MANAGER" == "pacman" ]]; then
+                GPU_PKGS=(
+                    mesa
+                    lib32-mesa
+                    vulkan-radeon
+                    lib32-vulkan-radeon
+                    libva-mesa-driver
+                    lib32-libva-mesa-driver
+                    mesa-vdpau
+                    lib32-mesa-vdpau
+                )
+            elif [[ "$PKG_MANAGER" == "apt" ]]; then
+                GPU_PKGS=(
+                    mesa-vulkan-drivers
+                    libva-mesa-driver
+                    mesa-vdpau-drivers
+                )
+            elif [[ "$PKG_MANAGER" == "dnf" ]]; then
+                GPU_PKGS=(
+                    mesa-dri-drivers
+                    mesa-vulkan-drivers
+                    mesa-va-drivers
+                    mesa-vdpau-drivers
+                )
+            fi
+            
+            for pkg in "${GPU_PKGS[@]}"; do
+                eval "$PKG_INSTALL $pkg" || print_warning "Failed to install $pkg"
+            done
+            
+            print_success "AMD GPU packages installed"
+            ;;
+            
+        intel)
+            print_info "Installing Intel packages..."
+            if [[ "$PKG_MANAGER" == "pacman" ]]; then
+                GPU_PKGS=(
+                    mesa
+                    lib32-mesa
+                    vulkan-intel
+                    lib32-vulkan-intel
+                    intel-media-driver
+                    libva-intel-driver
+                )
+            elif [[ "$PKG_MANAGER" == "apt" ]]; then
+                GPU_PKGS=(
+                    mesa-vulkan-drivers
+                    intel-media-va-driver
+                    i965-va-driver
+                )
+            elif [[ "$PKG_MANAGER" == "dnf" ]]; then
+                GPU_PKGS=(
+                    mesa-dri-drivers
+                    mesa-vulkan-drivers
+                    intel-media-driver
+                    libva-intel-driver
+                )
+            fi
+            
+            for pkg in "${GPU_PKGS[@]}"; do
+                eval "$PKG_INSTALL $pkg" || print_warning "Failed to install $pkg"
+            done
+            
+            print_success "Intel GPU packages installed"
+            ;;
+            
+        *)
+            print_warning "Unknown GPU type. Installing generic Mesa drivers..."
+            if [[ "$PKG_MANAGER" == "pacman" ]]; then
+                eval "$PKG_INSTALL mesa vulkan-icd-loader" || true
+            elif [[ "$PKG_MANAGER" == "apt" ]]; then
+                eval "$PKG_INSTALL mesa-vulkan-drivers" || true
+            elif [[ "$PKG_MANAGER" == "dnf" ]]; then
+                eval "$PKG_INSTALL mesa-vulkan-drivers" || true
+            fi
+            ;;
+    esac
+}
+
+# Generate GPU-optimized Hyprland config
+generate_gpu_env_vars() {
+    case "$GPU_TYPE" in
+        nvidia)
+            cat << 'EOF'
+# NVIDIA-specific environment variables
+env = LIBVA_DRIVER_NAME,nvidia
+env = XDG_SESSION_TYPE,wayland
+env = GBM_BACKEND,nvidia-drm
+env = __GLX_VENDOR_LIBRARY_NAME,nvidia
+env = WLR_NO_HARDWARE_CURSORS,1
+env = ELECTRON_OZONE_PLATFORM_HINT,auto
+
+# NVIDIA cursor fix
+cursor {
+    no_hardware_cursors = true
+}
+EOF
+            ;;
+            
+        amd)
+            cat << 'EOF'
+# AMD-specific environment variables
+env = LIBVA_DRIVER_NAME,radeonsi
+env = VDPAU_DRIVER,radeonsi
+env = AMD_VULKAN_ICD,RADV
+env = RADV_PERFTEST,gpl
+EOF
+            ;;
+            
+        intel)
+            cat << 'EOF'
+# Intel-specific environment variables
+env = LIBVA_DRIVER_NAME,iHD
+env = VDPAU_DRIVER,va_gl
+EOF
+            ;;
+            
+        *)
+            cat << 'EOF'
+# Generic environment variables
+EOF
+            ;;
+    esac
+}
+
+# Generate GPU-optimized rendering settings
+generate_gpu_render_settings() {
+    case "$GPU_TYPE" in
+        nvidia)
+            cat << 'EOF'
+# NVIDIA rendering optimizations
+render {
+    explicit_sync = 2
+    explicit_sync_kms = 2
+    direct_scanout = false
+}
+
+# Reduce tearing on NVIDIA
+misc {
+    vrr = 1
+    vfr = true
+}
+EOF
+            ;;
+            
+        amd)
+            cat << 'EOF'
+# AMD rendering optimizations
+render {
+    explicit_sync = 1
+    direct_scanout = true
+}
+
+misc {
+    vrr = 2
+    vfr = true
+}
+EOF
+            ;;
+            
+        intel)
+            cat << 'EOF'
+# Intel rendering optimizations
+render {
+    explicit_sync = 1
+    direct_scanout = true
+}
+
+misc {
+    vrr = 0
+    vfr = true
+}
+EOF
+            ;;
+            
+        *)
+            cat << 'EOF'
+# Default rendering settings
+render {
+    explicit_sync = 1
+}
+EOF
+            ;;
+    esac
+}
+
 # Detect distribution
 detect_distro() {
     if [[ -f /etc/os-release ]]; then
@@ -87,7 +371,6 @@ init_package_manager() {
             PKG_INSTALL="sudo apt-get install -y"
             PKG_UPDATE="sudo apt-get update && sudo apt-get upgrade -y"
             AUR_HELPER=""
-            # Debian warning flag
             if [[ "$DISTRO" == "debian" ]]; then
                 DEBIAN_HYPRLAND_WARNING=true
             fi
@@ -99,7 +382,6 @@ init_package_manager() {
             AUR_HELPER=""
             ;;
         *)
-            # Check ID_LIKE for derivative distros
             if [[ "$DISTRO_LIKE" == *"arch"* ]]; then
                 PKG_MANAGER="pacman"
                 PKG_INSTALL="sudo pacman -S --needed --noconfirm"
@@ -132,6 +414,7 @@ cat << 'EOF'
 ╔═══════════════════════════════════════╗
 ║          Vilo Installation            ║
 ║       Hyprland + Waybar + Walker      ║
+║        with GPU Auto-Detection        ║
 ╚═══════════════════════════════════════╝
 EOF
 echo -e "${NC}"
@@ -142,6 +425,9 @@ detect_distro
 init_package_manager
 print_success "Detected: $DISTRO (using $PKG_MANAGER)"
 echo ""
+
+# Detect GPU early
+detect_gpu
 
 # Debian Hyprland warning
 if [[ "${DEBIAN_HYPRLAND_WARNING:-false}" == "true" ]]; then
@@ -172,6 +458,7 @@ echo "  • Hyprland (Wayland compositor)"
 echo "  • Waybar (Status bar)"
 echo "  • Walker (Application launcher)"
 echo "  • Essential utilities and dependencies"
+echo "  • GPU-optimized settings for $GPU_VENDOR"
 echo ""
 
 # Confirm installation
@@ -197,6 +484,7 @@ if [[ "$PKG_MANAGER" == "pacman" ]]; then
         git
         wget
         curl
+        pciutils
     )
 elif [[ "$PKG_MANAGER" == "apt" ]]; then
     BASE_DEPS=(
@@ -208,6 +496,7 @@ elif [[ "$PKG_MANAGER" == "apt" ]]; then
         cmake
         ninja-build
         pkg-config
+        pciutils
     )
 elif [[ "$PKG_MANAGER" == "dnf" ]]; then
     BASE_DEPS=(
@@ -220,6 +509,7 @@ elif [[ "$PKG_MANAGER" == "dnf" ]]; then
         cmake
         ninja-build
         pkgconfig
+        pciutils
     )
 fi
 
@@ -228,6 +518,9 @@ for dep in "${BASE_DEPS[@]}"; do
     eval "$PKG_INSTALL $dep" || print_warning "Failed to install $dep (continuing...)"
 done
 print_success "Base dependencies installed"
+
+# Install GPU-specific drivers
+install_gpu_drivers
 
 # Install Hyprland and related packages
 print_step "Installing Hyprland Environment"
@@ -260,7 +553,6 @@ if [[ "$PKG_MANAGER" == "pacman" ]]; then
         wireplumber
     )
 elif [[ "$PKG_MANAGER" == "apt" ]]; then
-    # Enable backports for Debian if needed
     if [[ "$DISTRO" == "debian" ]]; then
         print_info "Enabling backports repository..."
         echo "deb http://deb.debian.org/debian $(lsb_release -sc)-backports main" | sudo tee /etc/apt/sources.list.d/backports.list || true
@@ -369,7 +661,6 @@ elif [[ "$PKG_MANAGER" == "apt" ]]; then
         fonts-font-awesome
         fonts-noto
     )
-    # Try to install Nerd Fonts manually for Debian/Ubuntu
     print_info "Installing Nerd Fonts..."
     mkdir -p ~/.local/share/fonts
     cd ~/.local/share/fonts
@@ -473,10 +764,9 @@ for dir in "${CONFIG_DIRS[@]}"; do
     fi
 done
 
-
-# Configure Hyprland
-print_step "Configuring Hyprland"
-print_info "Writing Hyprland configuration..."
+# Configure Hyprland with GPU optimizations
+print_step "Configuring Hyprland with GPU Optimizations"
+print_info "Writing GPU-optimized Hyprland configuration for $GPU_VENDOR..."
 
 # Determine launcher command based on what's available
 if command -v walker &> /dev/null; then
@@ -489,6 +779,7 @@ fi
 
 cat > ~/.config/hypr/hyprland.conf << EOF
 # Vilo Hyprland Configuration
+# GPU: $GPU_VENDOR ($GPU_TYPE)
 
 # Monitor configuration
 monitor=,preferred,auto,1
@@ -503,7 +794,7 @@ exec-once = blueman-applet
 exec-once = wl-paste --type text --watch cliphist store
 exec-once = wl-paste --type image --watch cliphist store
 
-# Environment variables
+# Common environment variables
 env = XCURSOR_SIZE,24
 env = QT_QPA_PLATFORMTHEME,qt5ct
 env = QT_QPA_PLATFORM,wayland
@@ -511,6 +802,8 @@ env = GDK_BACKEND,wayland
 env = XDG_CURRENT_DESKTOP,Hyprland
 env = XDG_SESSION_TYPE,wayland
 env = XDG_SESSION_DESKTOP,Hyprland
+
+$(generate_gpu_env_vars)
 
 # Input configuration
 input {
@@ -579,13 +872,15 @@ gestures {
     workspace_swipe_fingers = 3
 }
 
+# GPU-specific rendering settings
+$(generate_gpu_render_settings)
+
 # Misc settings
 misc {
     disable_hyprland_logo = true
     disable_splash_rendering = true
     mouse_move_enables_dpms = true
     key_press_enables_dpms = true
-    vrr = 0
 }
 
 # Window rules
@@ -610,320 +905,4 @@ bind = \$mainMod, F, fullscreen,
 bind = \$mainMod SHIFT, C, exec, cliphist list | rofi -dmenu | cliphist decode | wl-copy
 
 # Move focus with arrow keys
-bind = \$mainMod, left, movefocus, l
-bind = \$mainMod, right, movefocus, r
-bind = \$mainMod, up, movefocus, u
-bind = \$mainMod, down, movefocus, d
-
-# Move focus with vim keys
-bind = \$mainMod, h, movefocus, l
-bind = \$mainMod, l, movefocus, r
-bind = \$mainMod, k, movefocus, u
-bind = \$mainMod, j, movefocus, d
-
-# Switch workspaces
-bind = \$mainMod, 1, workspace, 1
-bind = \$mainMod, 2, workspace, 2
-bind = \$mainMod, 3, workspace, 3
-bind = \$mainMod, 4, workspace, 4
-bind = \$mainMod, 5, workspace, 5
-bind = \$mainMod, 6, workspace, 6
-bind = \$mainMod, 7, workspace, 7
-bind = \$mainMod, 8, workspace, 8
-bind = \$mainMod, 9, workspace, 9
-bind = \$mainMod, 0, workspace, 10
-
-# Move window to workspace
-bind = \$mainMod SHIFT, 1, movetoworkspace, 1
-bind = \$mainMod SHIFT, 2, movetoworkspace, 2
-bind = \$mainMod SHIFT, 3, movetoworkspace, 3
-bind = \$mainMod SHIFT, 4, movetoworkspace, 4
-bind = \$mainMod SHIFT, 5, movetoworkspace, 5
-bind = \$mainMod SHIFT, 6, movetoworkspace, 6
-bind = \$mainMod SHIFT, 7, movetoworkspace, 7
-bind = \$mainMod SHIFT, 8, movetoworkspace, 8
-bind = \$mainMod SHIFT, 9, movetoworkspace, 9
-bind = \$mainMod SHIFT, 0, movetoworkspace, 10
-
-# Scroll through workspaces
-bind = \$mainMod, mouse_down, workspace, e+1
-bind = \$mainMod, mouse_up, workspace, e-1
-
-# Move/resize windows
-bindm = \$mainMod, mouse:272, movewindow
-bindm = \$mainMod, mouse:273, resizewindow
-
-# Resize windows with keyboard
-bind = \$mainMod CTRL, left, resizeactive, -20 0
-bind = \$mainMod CTRL, right, resizeactive, 20 0
-bind = \$mainMod CTRL, up, resizeactive, 0 -20
-bind = \$mainMod CTRL, down, resizeactive, 0 20
-
-# Screenshots
-bind = , Print, exec, grim -g "\$(slurp)" - | wl-copy && notify-send "Screenshot" "Copied to clipboard"
-bind = SHIFT, Print, exec, grim - | wl-copy && notify-send "Screenshot" "Fullscreen copied to clipboard"
-bind = \$mainMod, Print, exec, grim -g "\$(slurp)" ~/Pictures/Screenshots/\$(date +%Y%m%d_%H%M%S).png && notify-send "Screenshot" "Saved to ~/Pictures/Screenshots/"
-
-# Media keys
-bind = , XF86AudioRaiseVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
-bind = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-bind = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
-bind = , XF86AudioMicMute, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
-bind = , XF86AudioPlay, exec, playerctl play-pause
-bind = , XF86AudioNext, exec, playerctl next
-bind = , XF86AudioPrev, exec, playerctl previous
-
-# Brightness
-bind = , XF86MonBrightnessUp, exec, brightnessctl set 5%+
-bind = , XF86MonBrightnessDown, exec, brightnessctl set 5%-
-EOF
-print_success "Hyprland configured (using $LAUNCHER_CMD as launcher)"
-
-# Configure Waybar
-print_step "Configuring Waybar"
-print_info "Writing Waybar configuration..."
-cat > ~/.config/waybar/config << 'EOF'
-{
-    "layer": "top",
-    "position": "top",
-    "height": 30,
-    "spacing": 4,
-    "modules-left": ["hyprland/workspaces", "hyprland/window"],
-    "modules-center": ["clock"],
-    "modules-right": ["pulseaudio", "network", "battery", "tray"],
-    
-    "hyprland/workspaces": {
-        "disable-scroll": false,
-        "all-outputs": true,
-        "format": "{icon}",
-        "format-icons": {
-            "1": "1",
-            "2": "2",
-            "3": "3",
-            "4": "4",
-            "5": "5",
-            "urgent": "",
-            "focused": "",
-            "default": ""
-        }
-    },
-    
-    "hyprland/window": {
-        "format": "{}",
-        "max-length": 50
-    },
-    
-    "clock": {
-        "format": "{:%H:%M  %d/%m/%Y}",
-        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
-    },
-    
-    "battery": {
-        "states": {
-            "warning": 30,
-            "critical": 15
-        },
-        "format": "{icon} {capacity}%",
-        "format-charging": " {capacity}%",
-        "format-plugged": " {capacity}%",
-        "format-icons": ["", "", "", "", ""]
-    },
-    
-    "network": {
-        "format-wifi": " {essid}",
-        "format-ethernet": " {ifname}",
-        "format-disconnected": "⚠ Disconnected",
-        "tooltip-format": "{ifname}: {ipaddr}/{cidr}"
-    },
-    
-    "pulseaudio": {
-        "format": "{icon} {volume}%",
-        "format-muted": " Muted",
-        "format-icons": {
-            "default": ["", "", ""]
-        },
-        "on-click": "pavucontrol"
-    },
-    
-    "tray": {
-        "icon-size": 21,
-        "spacing": 10
-    }
-}
-EOF
-
-cat > ~/.config/waybar/style.css << 'EOF'
-* {
-    border: none;
-    border-radius: 0;
-    font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free";
-    font-size: 13px;
-    min-height: 0;
-}
-
-window#waybar {
-    background: rgba(26, 27, 38, 0.9);
-    color: #cdd6f4;
-}
-
-#workspaces button {
-    padding: 0 5px;
-    color: #cdd6f4;
-    background-color: transparent;
-}
-
-#workspaces button.active {
-    color: #89b4fa;
-}
-
-#workspaces button.urgent {
-    color: #f38ba8;
-}
-
-#window,
-#clock,
-#battery,
-#network,
-#pulseaudio,
-#tray {
-    padding: 0 10px;
-}
-
-#battery.charging {
-    color: #a6e3a1;
-}
-
-#battery.warning:not(.charging) {
-    color: #f9e2af;
-}
-
-#battery.critical:not(.charging) {
-    color: #f38ba8;
-}
-
-#network.disconnected {
-    color: #f38ba8;
-}
-EOF
-print_success "Waybar configured"
-
-# Configure Kitty
-print_step "Configuring Kitty Terminal"
-cat > ~/.config/kitty/kitty.conf << 'EOF'
-# Vilo Kitty Configuration
-
-font_family      JetBrainsMono Nerd Font
-bold_font        auto
-italic_font      auto
-bold_italic_font auto
-font_size        11.0
-
-background_opacity 0.9
-window_padding_width 10
-
-# Color scheme (Catppuccin Mocha)
-foreground #cdd6f4
-background #1e1e2e
-cursor #f5e0dc
-
-color0  #45475a
-color1  #f38ba8
-color2  #a6e3a1
-color3  #f9e2af
-color4  #89b4fa
-color5  #f5c2e7
-color6  #94e2d5
-color7  #bac2de
-color8  #585b70
-color9  #f38ba8
-color10 #a6e3a1
-color11 #f9e2af
-color12 #89b4fa
-color13 #f5c2e7
-color14 #94e2d5
-color15 #a6adc8
-EOF
-print_success "Kitty configured"
-
-# Create screenshots directory
-mkdir -p ~/Pictures/Screenshots
-print_info "Created screenshots directory"
-
-# Create session starter
-print_step "Creating Session Starter"
-SESSION_FILE="$HOME/.local/share/applications/vilo-hyprland.desktop"
-mkdir -p "$(dirname "$SESSION_FILE")"
-
-cat > "$SESSION_FILE" << 'EOF'
-[Desktop Entry]
-Name=Vilo Hyprland
-Comment=Hyprland with Vilo configuration
-Exec=Hyprland
-Type=Application
-EOF
-print_success "Session starter created"
-
-# Installation complete
-clear
-echo -e "${GREEN}"
-cat << 'EOF'
-╔═══════════════════════════════════════╗
-║     Vilo Installation Complete!       ║
-╚═══════════════════════════════════════╝
-EOF
-echo -e "${NC}"
-
-echo -e "${CYAN}Installation Summary:${NC}"
-print_success "Hyprland environment installed"
-print_success "Waybar status bar configured"
-if command -v walker &> /dev/null; then
-    print_success "Walker launcher installed"
-else
-    print_warning "Walker not installed - using rofi/wofi as fallback"
-fi
-print_success "All configurations applied"
-echo ""
-
-# Distribution-specific notes
-if [[ "${DEBIAN_HYPRLAND_WARNING:-false}" == "true" ]]; then
-    echo -e "${YELLOW}Debian-specific Notes:${NC}"
-    echo "  • Debian’s Hyprland is extremely outdated."
-    echo "  • Some features may not work as expected"
-    echo "  • Consider using Arch or Fedora for optimal experience"
-    echo "  • Hyprland is not available for Bookworm as its packages are too old."
-    echo ""
-fi
-
-echo -e "${BLUE}Next Steps:${NC}"
-echo "  1. Reboot your system or log out"
-echo "  2. Select 'Hyprland' from your display manager"
-echo "  3. Log in and enjoy Vilo!"
-echo ""
-
-echo -e "${YELLOW}Essential Keybindings:${NC}"
-echo "  SUPER + RETURN       → Open terminal"
-echo "  SUPER + R            → Launch application launcher"
-echo "  SUPER + Q            → Close window"
-echo "  SUPER + M            → Exit Hyprland"
-echo "  SUPER + E            → File manager"
-echo "  SUPER + F            → Fullscreen"
-echo "  SUPER + V            → Toggle floating"
-echo "  SUPER + 1-9          → Switch workspace"
-echo "  SUPER + SHIFT + 1-9  → Move window to workspace"
-echo "  Print                → Screenshot area"
-echo "  SHIFT + Print        → Screenshot fullscreen"
-echo ""
-
-echo -e "${MAGENTA}Configuration Files:${NC}"
-echo "  Hyprland: ~/.config/hypr/hyprland.conf"
-echo "  Waybar:   ~/.config/waybar/"
-echo "  Kitty:    ~/.config/kitty/kitty.conf"
-echo ""
-
-echo -e "${CYAN}Join Our Community:${NC}"
-echo "  Discord: https://discord.gg/6naeNfwEtY"
-echo ""
-
-print_success "Installation completed successfully!"
-echo ""
-read -p "Press Enter to exit..."
+bind = \$mainM
