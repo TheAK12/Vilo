@@ -362,7 +362,7 @@ init_package_manager() {
     case "$DISTRO" in
         arch|manjaro|endeavouros|garuda|arcolinux|cachyos)
             PKG_MANAGER="pacman"
-            PKG_INSTALL="sudo pacman -S --needed --noconfirm"
+            PKG_INSTALL="sudo pacman -Syu --needed --noconfirm"
             PKG_UPDATE="sudo pacman -Syu --noconfirm"
             AUR_HELPER="yay"
             ;;
