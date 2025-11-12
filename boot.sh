@@ -60,7 +60,7 @@ error_exit() {
 # Cleanup function
 cleanup() {
     if [ $? -ne 0 ]; then
-        print_error "Installation failed. Please check the errors above."
+        print_error "Installation failed."
         print_info "You can try running the installer again or report the issue at:"
         print_info "https://github.com/CyberHuman-bot/Vilo/issues"
     fi
@@ -159,7 +159,7 @@ init_package_manager() {
         arch|manjaro|endeavouros|garuda|arcolinux|cachyos)
             PKG_MANAGER="pacman"
             PKG_INSTALL="sudo pacman -S --needed --noconfirm"
-            PKG_UPDATE="sudo pacman -Sy"
+            PKG_UPDATE="sudo pacman -Syu"
             PACKAGES=(wget git curl pciutils)
             ;;
         debian|ubuntu|linuxmint|pop|elementary|zorin)
@@ -194,7 +194,7 @@ init_package_manager() {
             if [[ "$DISTRO_LIKE" == *"arch"* ]]; then
                 PKG_MANAGER="pacman"
                 PKG_INSTALL="sudo pacman -S --needed --noconfirm"
-                PKG_UPDATE="sudo pacman -Sy"
+                PKG_UPDATE="sudo pacman -Syu"
                 PACKAGES=(wget git curl pciutils)
             elif [[ "$DISTRO_LIKE" == *"debian"* ]] || [[ "$DISTRO_LIKE" == *"ubuntu"* ]]; then
                 PKG_MANAGER="apt"
